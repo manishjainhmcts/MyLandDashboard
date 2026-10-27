@@ -1,50 +1,52 @@
-import streamlit as st
-import pandas as pd
-import sqlite3
-from pathlib import Path
-from datetime import datetime
-import math
 import os
 import hmac
+import math
+from datetime import date
+from urllib.parse import quote
+import pandas as pd
+import requests
+import streamlit as st
 
 st.set_page_config(page_title="Dartford Land Finder", page_icon="🏡", layout="wide")
 st.title("Dartford Land Finder")
-st.caption("Private research dashboard · 15-mile radius · £200,000 land ceiling · four-bedroom home + separate private badminton hall")
+st.caption("Private land research · Dartford 15-mile radius · £200,000 land budget · four-bedroom home + private badminton hall")
 
-# Authentication must be configured before public deployment.
-password = st.secrets.get("APP_PASSWORD", os.environ.get("APP_PASSWORD", ""))
+def setting(name):
+    return st.secrets.get(name, os.environ.get(name, ""))
+
+password = setting("APP_PASSWORD")
 if not password:
-    st.error("Private access is not configured. Set APP_PASSWORD in Streamlit secrets before using this app.")
+    st.error("Set APP_PASSWORD in Streamlit app secrets before use.")
     st.stop()
-entered = st.text_input("Dashboard password", type="password")
-if not hmac.compare_digest(entered, password):
+if not hmac.compare_digest(st.text_input("Dashboard password", type="password"), password):
     st.info("Enter your private password to continue.")
     st.stop()
 
-st.warning("Prototype: records are stored in local SQLite and may be lost when free cloud hosting restarts. Export your CSV regularly; use a persistent cloud database before relying on this for long-term storage.")
-DB = Path("land_sites.db")
-conn = sqlite3.connect(DB)
-conn.execute("""CREATE TABLE IF NOT EXISTS sites (
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-name TEXT, location TEXT, price REAL, area_acres REAL, latitude REAL, longitude REAL,
-planning TEXT, green_belt TEXT, flood_risk TEXT, access TEXT, utilities TEXT,
-listing_url TEXT, notes TEXT, added_at TEXT)""")
-conn.commit()
-DARTFORD_LAT, DARTFORD_LON = 51.4462, 0.2169
+api_url = setting("SUPABASE_URL").rstrip("/")
+api_key = setting("SUPABASE_SERVICE_ROLE_KEY")
+if not api_url.startswith("https://") or not api_key:
+    st.error("Supabase connection not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Streamlit secrets.")
+    st.stop()
 
-def miles(lat, lon):
-    p1, p2 = math.radians(DARTFORD_LAT), math.radians(lat)
-    dp, dl = math.radians(lat-DARTFORD_LAT), math.radians(lon-DARTFORD_LON)
-    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
-    return 3958.8*2*math.atan2(math.sqrt(a), math.sqrt(1-a))
+def api(table, method="GET", params=None, payload=None):
+    headers = {"apikey": api_key, "Authorization": "Bearer " + api_key, "Content-Type": "application/json", "Prefer": "return=representation"}
+    response = requests.request(method, api_url + "/rest/v1/" + table, headers=headers, params=params, json=payload, timeout=20)
+    response.raise_for_status()
+    return response.json() if response.content else []
 
-def load():
-    df = pd.read_sql_query("SELECT * FROM sites ORDER BY added_at DESC", conn)
+def get_rows(table, params=None):
+    return api(table, params={"select": "*", "order": "created_at.desc", **(params or {})})
+
+def distance(lat, lon):
+    lat1, lon1 = 51.4462, 0.2169
+    a = math.sin(math.radians(lat-lat1)/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat))*math.sin(math.radians(lon-lon1)/2)**2
+    return 3958.8 * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+def listings():
+    df = pd.DataFrame(get_rows("sites"))
     if not df.empty:
-        df["distance_miles"] = df.apply(lambda r: round(miles(r.latitude,r.longitude),1) if pd.notna(r.latitude) and pd.notna(r.longitude) else None, axis=1)
-        df["within_budget"] = df.price <= 200000
-        df["within_radius"] = df.distance_miles <= 15
-        df["score"] = df.apply(lambda r: (40 if r.within_budget else 0) + (25 if r.within_radius else 0) + (20 if r.planning == "Residential permission" else 10 if r.planning == "Potential (unverified)" else 0) + (15 if pd.notna(r.area_acres) and r.area_acres >= .25 else 0), axis=1)
+        df["distance_miles"] = df.apply(lambda r: round(distance(float(r.latitude), float(r.longitude)), 1), axis=1)
+        df["score"] = df.apply(lambda r: (40 if r.price <= 200000 else 0) + (25 if r.distance_miles <= 15 else 0) + (20 if r.planning == "Residential permission" else 10 if r.planning == "Potential (unverified)" else 0) + (15 if r.area_acres >= .25 else 0), axis=1)
     return df
 
 with st.sidebar:
@@ -52,129 +54,112 @@ with st.sidebar:
     max_price = st.number_input("Maximum land price (£)", min_value=0, value=200000, step=10000)
     max_distance = st.slider("Radius from Dartford (miles)", 1, 30, 15)
     min_acres = st.number_input("Minimum plot size (acres)", min_value=0.0, value=0.25, step=0.05)
-    st.markdown("**Build brief:** four-bedroom detached house and a separate, family-only badminton hall.")
-    st.caption("Planning, access, site services and a high-clearance hall need independent verification.")
+    st.caption("Planning, flood risk, Green Belt and suitability for a separate sports hall require independent checks.")
 
-tab1, tab2, tab3, tab4 = st.tabs(["Explore plots", "Add a plot", "Planning & guidance", "Auction sources"])
-with tab1:
-    df = load()
-    if df.empty:
-        st.info("No listings entered yet. Use 'Add a plot' to start your shortlist. No live Rightmove or Zoopla feed is connected.")
+try:
+    sites = listings()
+except requests.RequestException:
+    st.error("Could not reach the private database. Check the Streamlit secrets and Supabase project status.")
+    st.stop()
+
+explore, add, guidance, auctions = st.tabs(["Explore plots", "Add a plot", "Planning & guidance", "Auction sources"])
+with explore:
+    if sites.empty:
+        st.info("No plots saved yet. No automatic Rightmove, Zoopla or auction feed is connected.")
     else:
-        filtered = df[(df.price <= max_price) & (df.distance_miles <= max_distance) & (df.area_acres >= min_acres)].copy()
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Matching plots",len(filtered))
-        c2.metric("Lowest asking price", f"£{filtered.price.min():,.0f}" if len(filtered) else "—")
-        c3.metric("Plots with residential permission", int((filtered.planning=="Residential permission").sum()))
+        filtered = sites[(sites.price <= max_price) & (sites.distance_miles <= max_distance) & (sites.area_acres >= min_acres)]
+        a,b,c = st.columns(3)
+        a.metric("Matching plots", len(filtered))
+        b.metric("Lowest asking price", f"£{filtered.price.min():,.0f}" if len(filtered) else "—")
+        c.metric("Residential permission", int((filtered.planning == "Residential permission").sum()))
         if len(filtered):
-            st.map(filtered.rename(columns={"latitude":"lat","longitude":"lon"})[["lat","lon"]].dropna())
-            columns=["name","location","price","area_acres","distance_miles","planning","green_belt","flood_risk","score","listing_url","notes"]
-            st.dataframe(filtered[columns].sort_values("score",ascending=False), use_container_width=True, hide_index=True,
-                         column_config={"listing_url":st.column_config.LinkColumn("Listing")})
-        st.download_button("Export all saved plots (CSV)", df.to_csv(index=False).encode("utf-8"), "dartford_plots.csv", "text/csv")
-        with st.expander("Delete a saved plot"):
-            choices={f"{int(r.id)} · {r['name']}":int(r.id) for _,r in df.iterrows()}
-            choice=st.selectbox("Select plot",list(choices))
+            st.map(filtered.rename(columns={"latitude": "lat", "longitude": "lon"})[["lat", "lon"]])
+            cols = ["name","location","price","area_acres","distance_miles","planning","green_belt","flood_risk","score","listing_url","notes"]
+            st.dataframe(filtered[cols].sort_values("score", ascending=False), use_container_width=True, hide_index=True, column_config={"listing_url": st.column_config.LinkColumn("Listing")})
+        st.download_button("Export plots CSV", sites.to_csv(index=False), "dartford_plots.csv", "text/csv")
+        with st.expander("Delete saved plot"):
+            choices = {f"{int(r.id)} · {r['name']}": int(r.id) for _,r in sites.iterrows()}
+            chosen = st.selectbox("Plot", list(choices))
             if st.button("Delete selected plot"):
-                conn.execute("DELETE FROM sites WHERE id=?", (choices[choice],))
-                conn.commit()
-                st.rerun()
-with tab2:
-    st.subheader("Save a property listing")
-    st.caption("Copy details from a listing you are authorised to view. Coordinates are required for the radius map.")
+                try:
+                    api("sites", "DELETE", {"id": "eq." + str(choices[chosen])})
+                    st.rerun()
+                except requests.RequestException as e:
+                    st.error("Delete failed; please try again.")
+
+with add:
     with st.form("new_site"):
-        name=st.text_input("Plot name / reference")
-        location=st.text_input("Area / address")
-        price=st.number_input("Asking price (£)",min_value=0,step=5000)
-        area=st.number_input("Area (acres)",min_value=0.0,step=0.05,format="%.2f")
-        lat=st.number_input("Latitude",value=51.4462,format="%.6f")
-        lon=st.number_input("Longitude",value=0.2169,format="%.6f")
-        planning=st.selectbox("Planning",["Unknown","Potential (unverified)","Residential permission","No residential permission"])
-        green=st.selectbox("Green Belt",["Unknown","Yes","No"])
-        flood=st.selectbox("Flood risk",["Unknown","Potential risk","No known risk (unverified)"])
-        access=st.text_input("Road access")
-        utilities=st.text_input("Utilities")
-        url=st.text_input("Original listing URL")
-        notes=st.text_area("Notes / concerns")
-        save=st.form_submit_button("Save plot")
-        if save:
-            if not name.strip():
-                st.error("Please enter a plot name.")
-            elif url and not url.startswith(("https://","http://")):
-                st.error("Listing URL must start with https:// or http://")
-            else:
-                conn.execute("""INSERT INTO sites (name,location,price,area_acres,latitude,longitude,planning,green_belt,flood_risk,access,utilities,listing_url,notes,added_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(name,location,price,area,lat,lon,planning,green,flood,access,utilities,url,notes,datetime.now().isoformat()))
-                conn.commit()
-                st.success("Plot saved. See Explore plots.")
-with tab3:
-    st.subheader("Checks before making an offer")
+        name = st.text_input("Plot name / reference")
+        location = st.text_input("Area / address")
+        price = st.number_input("Asking price (£)", min_value=0, step=5000)
+        acres = st.number_input("Area (acres)", min_value=0.0, step=0.05, format="%.2f")
+        lat = st.number_input("Latitude", value=51.4462, format="%.6f")
+        lon = st.number_input("Longitude", value=0.2169, format="%.6f")
+        planning = st.selectbox("Planning", ["Unknown","Potential (unverified)","Residential permission","No residential permission"])
+        green = st.selectbox("Green Belt", ["Unknown","Yes","No"])
+        flood = st.selectbox("Flood risk", ["Unknown","Potential risk","No known risk (unverified)"])
+        access = st.text_input("Road access")
+        utilities = st.text_input("Utilities")
+        url = st.text_input("Original listing URL")
+        notes = st.text_area("Notes / concerns")
+        submitted = st.form_submit_button("Save plot")
+    if submitted:
+        if not name.strip():
+            st.error("Enter a plot name.")
+        elif url and not url.startswith(("https://","http://")):
+            st.error("Listing URL must start with http:// or https://")
+        else:
+            record = dict(name=name.strip(),location=location,price=price,area_acres=acres,latitude=lat,longitude=lon,planning=planning,green_belt=green,flood_risk=flood,access=access,utilities=utilities,listing_url=url.strip() or None,notes=notes)
+            try:
+                api("sites", "POST", payload=record)
+                st.success("Plot saved to Supabase.")
+            except requests.HTTPError as e:
+                st.error("Could not save plot. Check for a duplicate listing URL.")
+
+with guidance:
     st.markdown("""
-    - **Planning:** Check the relevant local planning authority for residential consent and whether a tall, separate sports hall is acceptable.
-    - **Green Belt and flood risk:** Confirm designations against official maps, not listing descriptions.
-    - **Design:** Check badminton court run-offs and unobstructed clear height with a qualified designer.
-    - **Budget:** £200,000 maximum land cost; up to £500,000 proposed build finance is not guaranteed.
-    - **Due diligence:** Road access, services, covenants, trees, ground conditions and legal title.
+    - **Planning:** Verify residential consent and permission for a separate tall sports hall.
+    - **Green Belt and flood risk:** Check official maps independently.
+    - **Site suitability:** Confirm access, utilities, covenants, ground conditions and badminton hall clearances.
+    - **Budget:** £200,000 land ceiling; build finance is not guaranteed.
     """)
     st.link_button("Planning Portal", "https://www.planningportal.co.uk/")
-    st.link_button("Flood risk (GOV.UK)", "https://www.gov.uk/check-long-term-flood-risk")
+    st.link_button("GOV.UK flood risk", "https://www.gov.uk/check-long-term-flood-risk")
     st.link_button("Dartford Borough Council", "https://www.dartford.gov.uk/")
-    st.caption("Scores are rough screening aids, not evidence of planning permission or buildability.")
+    st.caption("Scores are screening aids, not evidence of buildability.")
 
-# Auction lots are separate source records linked to a saved plot, not duplicate plots.
-conn.execute("""CREATE TABLE IF NOT EXISTS auction_sources (
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-site_id INTEGER NOT NULL,
-auction_house TEXT NOT NULL,
-lot_reference TEXT,
-guide_price REAL,
-auction_date TEXT,
-listing_url TEXT NOT NULL UNIQUE,
-legal_pack_url TEXT,
-notes TEXT,
-created_at TEXT NOT NULL
-)""")
-conn.commit()
-with tab4:
-    st.subheader("Auction properties")
-    st.caption("Clive Emson, Auction House, Allsop and Savills Auctions. Manual entries only; no live feed is connected.")
+with auctions:
+    st.caption("Manual auction records only. No live feed is connected.")
     st.markdown("[Clive Emson](https://www.cliveemson.co.uk/) · [Auction House](https://www.auctionhouse.co.uk/) · [Allsop](https://www.allsop.co.uk/) · [Savills Auctions](https://auctions.savills.co.uk/)")
-    st.info("Auction guide prices are not sale prices. Check fees, legal packs, special conditions and planning before bidding.")
-    sites=load()
+    st.warning("Auction guide prices are not sale prices; check fees and legal packs.")
     if sites.empty:
-        st.warning("Add the plot under 'Add a plot' first, then attach its auction listing here.")
+        st.info("Add a plot first, then link auction listings.")
     else:
-        labels={int(r.id):f"{r['name']} — {r['location']}" for _,r in sites.iterrows()}
-        with st.form("auction_lot"):
-            site_id=st.selectbox("Existing plot (one plot can have several auction listings)",list(labels),format_func=lambda k:labels[k])
-            house=st.selectbox("Auction house",["Clive Emson","Auction House","Allsop","Savills Auctions","Other"])
-            ref=st.text_input("Lot reference")
-            guide=st.number_input("Guide price (£)",min_value=0,step=5000)
-            date=st.text_input("Auction date (YYYY-MM-DD, optional)")
-            url=st.text_input("Auction listing URL")
-            legal=st.text_input("Legal pack URL (optional)")
-            notes=st.text_area("Auction notes")
-            submit=st.form_submit_button("Attach auction source")
-        if submit:
-            import re
-            if not url.startswith(("https://","http://")):
-                st.error("Enter a valid auction listing URL.")
-            elif date and not re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}",date):
-                st.error("Use YYYY-MM-DD for the auction date.")
-            elif conn.execute("SELECT 1 FROM auction_sources WHERE listing_url=?",(url.strip(),)).fetchone():
-                st.warning("This auction listing is already saved; it was not duplicated.")
+        labels = {int(r.id): f"{r['name']} — {r['location']}" for _,r in sites.iterrows()}
+        with st.form("auction"):
+            site_id = st.selectbox("Existing plot", list(labels), format_func=lambda k: labels[k])
+            house = st.selectbox("Auction house", ["Clive Emson","Auction House","Allsop","Savills Auctions","Other"])
+            lot = st.text_input("Lot reference")
+            guide = st.number_input("Guide price (£)", min_value=0, step=5000)
+            auction_date = st.date_input("Auction date", value=None)
+            listing_url = st.text_input("Auction listing URL")
+            legal_url = st.text_input("Legal pack URL")
+            auction_notes = st.text_area("Auction notes")
+            save = st.form_submit_button("Attach auction source")
+        if save:
+            if not listing_url.startswith(("https://","http://")):
+                st.error("Enter a valid auction URL.")
             else:
-                conn.execute("""INSERT INTO auction_sources
-                    (site_id,auction_house,lot_reference,guide_price,auction_date,listing_url,legal_pack_url,notes,created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (site_id,house,ref,guide,date,url.strip(),legal,notes,datetime.now().isoformat()))
-                conn.commit()
-                st.success("Auction source linked to the existing plot.")
-        lots=pd.read_sql_query("""SELECT a.auction_house,a.lot_reference,a.guide_price,a.auction_date,
-            a.listing_url,a.legal_pack_url,a.notes,s.name AS plot_name,s.location
-            FROM auction_sources a JOIN sites s ON a.site_id=s.id ORDER BY a.created_at DESC""",conn)
-        if not lots.empty:
-            st.dataframe(lots,hide_index=True,use_container_width=True,
-                column_config={"listing_url":st.column_config.LinkColumn("Auction listing"),
-                               "legal_pack_url":st.column_config.LinkColumn("Legal pack")})
-            st.download_button("Export auction sources CSV",lots.to_csv(index=False).encode(),"dartford_auction_sources.csv","text/csv")
+                record = dict(site_id=site_id,auction_house=house,lot_reference=lot,guide_price=guide,auction_date=auction_date.isoformat() if auction_date else None,listing_url=listing_url.strip(),legal_pack_url=legal_url or None,notes=auction_notes)
+                try:
+                    api("auction_sources", "POST", payload=record)
+                    st.success("Auction source saved.")
+                except requests.HTTPError:
+                    st.error("Could not save auction listing; it may already exist.")
+        try:
+            lots = pd.DataFrame(get_rows("auction_sources"))
+            if not lots.empty:
+                st.dataframe(lots, use_container_width=True, hide_index=True, column_config={"listing_url": st.column_config.LinkColumn("Auction listing"),"legal_pack_url": st.column_config.LinkColumn("Legal pack")})
+                st.download_button("Export auction CSV", lots.to_csv(index=False), "dartford_auction_sources.csv", "text/csv")
+        except requests.RequestException:
+            st.error("Could not load auction records.")
