@@ -29,7 +29,10 @@ if not api_url.startswith("https://") or not api_key:
     st.stop()
 
 def api(table, method="GET", params=None, payload=None):
-    headers = {"apikey": api_key, "Authorization": "Bearer " + api_key, "Content-Type": "application/json", "Prefer": "return=representation"}
+    headers = {"apikey": api_key, "Content-Type": "application/json", "Prefer": "return=representation"}
+    # Modern sb_secret_* API keys are not JWTs and must not be used as Bearer tokens.
+    if not api_key.startswith("sb_secret_"):
+        headers["Authorization"] = "Bearer " + api_key
     response = requests.request(method, api_url + "/rest/v1/" + table, headers=headers, params=params, json=payload, timeout=20)
     response.raise_for_status()
     return response.json() if response.content else []
@@ -58,8 +61,12 @@ with st.sidebar:
 
 try:
     sites = listings()
+except requests.HTTPError as exc:
+    status = exc.response.status_code if exc.response is not None else "unknown"
+    st.error(f"Supabase API returned HTTP {status}. Check SUPABASE_URL and the private API key in Streamlit secrets. For a new Supabase secret key, use the sb_secret_... value; for a legacy key, use service_role.")
+    st.stop()
 except requests.RequestException:
-    st.error("Could not reach the private database. Check the Streamlit secrets and Supabase project status.")
+    st.error("Network connection to Supabase failed. Verify SUPABASE_URL and try again.")
     st.stop()
 
 explore, add, guidance, auctions = st.tabs(["Explore plots", "Add a plot", "Planning & guidance", "Auction sources"])
