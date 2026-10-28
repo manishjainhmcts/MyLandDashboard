@@ -69,7 +69,7 @@ except requests.RequestException:
     st.error("Network connection to Supabase failed. Verify SUPABASE_URL and try again.")
     st.stop()
 
-explore, add, guidance, auctions = st.tabs(["Explore plots", "Add a plot", "Planning & guidance", "Auction sources"])
+explore, add, guidance, auctions, discovery = st.tabs(["Explore plots", "Add a plot", "Planning & guidance", "Auction sources", "Find land"])
 with explore:
     if sites.empty:
         st.info("No plots saved yet. No automatic Rightmove, Zoopla or auction feed is connected.")
@@ -170,3 +170,19 @@ with auctions:
                 st.download_button("Export auction CSV", lots.to_csv(index=False), "dartford_auction_sources.csv", "text/csv")
         except requests.RequestException:
             st.error("Could not load auction records.")
+
+with discovery:
+    st.subheader("Find land around Dartford")
+    st.caption("Research leads and source searches; not a live listing feed. Check prices, availability, exact location and planning before making decisions.")
+    sources = [
+        ("Clive Emson — Dartford auction catalogue", "https://www.cliveemson.co.uk/properties/kent/dartford/"),
+        ("PrimeLocation — Dartford land", "https://www.primelocation.com/for-sale/farms-land/dartford/"),
+        ("Robinson & Hall — Valley Road building plot", "https://www.robinsonandhallauctions.co.uk/property/building-plot-to-the-rear-of-8-valley-road-dartford-kent-da1-3pj/"),
+        ("Barney Estates — Rowhill Road land", "https://www.barneyestates.co.uk/property/land-off-rowhill-road-dartford-kent-da2-7qq/"),
+        ("EIG — Kent land auctions", "https://www.eigpropertyauctions.co.uk/search/site-land/kent"),
+        ("OnTheMarket — Kent auction land", "https://www.onthemarket.com/auction/farms-land/kent/"),
+    ]
+    for label, link in sources:
+        st.markdown(f"- [{label}]({link})")
+    st.info("Promising search leads include Stock Lane, Wilmington (advertised around £80,000, approximately two-thirds acre) and Valley Road, Dartford (auction guide £65,000+, consent only for a one-bedroom bungalow). These may be unavailable or unsuitable. Verify everything at source.")
+    st.warning("No scheduled imports are active. Automatic updates require a permitted API, feed or data-sharing arrangement; we do not scrape Rightmove or Zoopla.")
